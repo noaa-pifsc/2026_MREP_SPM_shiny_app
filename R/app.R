@@ -11,55 +11,18 @@ library(markdown)
 source("./sim_data_funs.R") 
 source("./fit_spm_funs.R")
 
-scens <- c("healthy", "overfished", "recovering")
-hist_catch <- read.csv("./historical_data.csv") %>%
-  select(Year, Species, Catch, Scenario, Effort, CPUE) %>%
-  # Convert species code names to display names
-  mutate(
-    Species = case_when(
-      Species == "yellowfin_tuna" ~ "Yellowfin Tuna",
-      Species == "mahi_mahi" ~ "Mahi Mahi",
-      Species == "Opakapaka" ~ "Opakapaka",
-      Species == "Peacock_grouper" ~ "Peacock Grouper",
-      Species == "Yellowfin_goatfish" ~ "Yellowfin Goatfish",
-      TRUE ~ Species
-    ),
-    # Rename columns to match your table format
-    Date = as.character(Year),
-    Count = ceiling(Catch),  # Assuming Catch represents count
-    Effort = round(Effort, 1)
-  ) %>% 
-  filter(Scenario %in% scens) %>%
-  mutate(Sps_scenario = paste(Species, Scenario, sep = "_"))
-  
-hist_catch_shiny <- hist_catch %>%
-  #filter(scenario == "healthy") %>% # adjust based on what scenario you want to use per species
-  select(Species, Scenario, Date, Count, Effort) 
+workshop_species <- "Opakapaka"
+number_of_drops <- 5
 
-# Create the scaling objects once at app startup
-scaling_by_species <- hist_catch_shiny %>%
-  group_by(Species, Scenario) %>%
-  tidyr::nest() %>%
-  mutate(
-    # Step A: Generate unique scaling for each species
-    scaling_logic = purrr::map(data, ~create_bidirectional_scaling(.x)),
-    
-    # Step B: Apply scaling logic to the nested data
-    formatted_table = purrr::map2(data, scaling_logic, 
-      ~display_for_workshop(.x, .y))
-  ) %>%
-  # Step C: Add both Species and Scenario back into formatted_table
-  mutate(formatted_table = purrr::pmap(list(formatted_table, Species, Scenario), 
-    function(table, species, scenario) {
-      table$Species <- species
-      table$Scenario <- scenario
-      return(table)
-  })) %>%
-  ungroup() %>%
-  select(formatted_table) %>%
-  tidyr::unnest(cols = c(formatted_table)) %>%
-  select(Species, Scenario, Date, Count, Effort) %>%
-  mutate(Count = round(Count))
+empty_workshop_data <- function(n_rows = 0, drops = number_of_drops) {
+  data.frame(
+    Species = rep(workshop_species, n_rows),
+    Year = rep(NA_real_, n_rows),
+    "Number of Drops" = rep(drops, n_rows),
+    Count = rep(NA_real_, n_rows),
+    check.names = FALSE
+  )
+}
 
 
 ui <- page_sidebar(
@@ -113,7 +76,7 @@ ui <- page_sidebar(
 server <- function(input, output, session) {
   
   current_page <- reactiveVal("welcome")
-  fish_data <- reactiveVal(scaling_by_species)
+  fish_data <- reactiveVal(empty_workshop_data())
   model_results <- reactiveVal(NULL)
   # A place to store saved plots and results
   saved_results <- reactiveVal(list())
@@ -160,29 +123,42 @@ server <- function(input, output, session) {
       ),
       
       "data_entry" = div(
-        h3("Catch and Effort Data"),
+        h3("Catch Data"),
         
         fluidRow(
           column(3,
             selectInput("filter_species", 
                        "Select Species:", 
-                       choices = c("All Species", sort(unique(fish_data()$Species))),
-                       selected = "All Species",
+                       choices = workshop_species,
+                       selected = workshop_species,
                        width = "100%")
           ),
           column(3,
-            selectInput("filter_scenario", 
-                       "Select Scenario:", 
-                       choices = c("All Scenarios", sort(unique(fish_data()$Scenario))),
-                       selected = "All Scenarios",
-                       width = "100%")
+            numericInput("number_of_drops", "Number of Drops:", value = number_of_drops,
+                         min = 1, step = 1, width = "100%")
+          ),
+          column(3,
+            numericInput("start_year", "Start Year:", value = 2012,
+                         min = 1, step = 1, width = "100%")
+          ),
+          column(3,
+            numericInput("end_year", "End Year:", value = 2023,
+                         min = 1, step = 1, width = "100%")
+          )
+        ),
+        div(style = "margin-top: 12px;",
+          actionButton("create_year_rows", "Create Year Rows", class = "btn-primary"),
+          actionButton("delete_rows", "Delete Selected Rows")
+        ),
+        fluidRow(
+          column(6,
+            div(style = "margin-top: 12px;",
+              downloadButton("download_data", "Download CSV")
+            )
           ),
           column(6,
-            div(style = "padding-top: 25px;",
-              actionButton("add_data", "Add data", class = "btn-primary"),
-              actionButton("edit_row", "Edit row"),
-              actionButton("delete_row", "Delete row")
-            )
+            fileInput("upload_data", "Upload combined CSV", accept = ".csv",
+                      buttonLabel = "Choose CSV")
           )
         ),
         br(),
@@ -192,7 +168,6 @@ server <- function(input, output, session) {
         
         br(),
         
-        # Conditional plots - only show when species and scenario are selected
         uiOutput("data_plots_ui")
       ),
       
@@ -202,7 +177,7 @@ server <- function(input, output, session) {
         fluidRow(
           column(12,
             wellPanel(
-              p("Select a species and scenario on the Data Entry page, then click the button below to run the model."),
+              p("Review the Opakapaka data on the Data Entry page, then click the button below to run the model."),
               actionButton("run_model_btn", "Run Model", class = "btn-primary btn-lg", width = "100%")
             )
           )
@@ -229,43 +204,43 @@ server <- function(input, output, session) {
     )
   })
   
- # Render datatable (shows all data)
+ # Render directly editable workshop data
   output$data_table <- renderDT({
     datatable(
-      filtered_data_table()
+      fish_data(),
+      rownames = FALSE,
+      editable = list(target = "cell", disable = list(columns = c(0, 1, 2))),
+      selection = list(mode = "multiple", target = "row"),
+      options = list(dom = "t", paging = FALSE, scrollY = "360px", scrollCollapse = TRUE)
     )
   })
   
-  # Create filtered data for display
+  # Convert the workshop table to the columns required by the model.
   filtered_data_table <- reactive({
-    data <- fish_data()
-    
-    # Filter by species if not "All Species"
-    if (input$filter_species != "All Species") {
-      data <- data %>% filter(Species == input$filter_species)
-    }
-    
-    # Filter by scenario if not "All Scenarios"
-    if (input$filter_scenario != "All Scenarios") {
-      data <- data %>% filter(Scenario == input$filter_scenario)
-    }
-    
-    return(data)
+    fish_data()
   })
 
-   # Conditional UI for plots - only show when specific species and scenario selected
-  output$data_plots_ui <- renderUI({
-    # Only show plots if specific species and scenario are selected
-    if (input$filter_species == "All Species" || input$filter_scenario == "All Scenarios") {
-      return(
-        div(
-          style = "padding: 20px; text-align: center; color: #666;",
-          p("Select a specific species and scenario to view plots")
-        )
-      )
+  model_data <- reactive({
+    fish_data() %>%
+      filter(!is.na(Year), !is.na(Count)) %>%
+      transmute(
+        Date = Year,
+        Count = Count,
+        Effort = `Number of Drops`
+      ) %>%
+      arrange(Date)
+  })
+
+  output$download_data <- downloadHandler(
+    filename = function() {
+      sprintf("opakapaka_workshop_data_%s.csv", Sys.Date())
+    },
+    content = function(file) {
+      utils::write.csv(fish_data(), file, row.names = FALSE)
     }
-    
-    # Show the plots
+  )
+
+  output$data_plots_ui <- renderUI({
     fluidRow(
       column(6,
         plotOutput("catch_plot", height = "400px")
@@ -278,10 +253,7 @@ server <- function(input, output, session) {
   
   # Render catch plot
   output$catch_plot <- renderPlot({
-    req(input$filter_species != "All Species")
-    req(input$filter_scenario != "All Scenarios")
-    
-    data <- filtered_data_table()
+    data <- model_data()
     req(nrow(data) > 0)
     
     plot_catch_data(data)
@@ -289,10 +261,7 @@ server <- function(input, output, session) {
   
   # Render CPUE plot
   output$cpue_plot <- renderPlot({
-    req(input$filter_species != "All Species")
-    req(input$filter_scenario != "All Scenarios")
-    
-    data <- filtered_data_table()
+    data <- model_data()
     req(nrow(data) > 0)
     
     plot_cpue(data)
@@ -380,26 +349,15 @@ server <- function(input, output, session) {
 
    # Run model when button is clicked
   observeEvent(input$run_model_btn, {
-    
-    # Check if a specific species is selected
-    if (input$filter_species == "All Species") {
-      showNotification("Please select a specific species on the Data Entry page", type = "warning", duration = 5)
-      return()
-    }
-    
     # Show progress notification
     showNotification("Running model...", id = "model_run", duration = NULL, type = "message")
     
-    # Use the already filtered data from the data entry page
-    species_data <- filtered_data_table()
+    species_data <- model_data()
     
     # Check if there's data
-    if (nrow(species_data) == 0) {
+    if (nrow(species_data) < 3) {
       removeNotification("model_run")
-      showNotification(paste("No data available for", input$filter_species, 
-                            ifelse(input$filter_scenario != "All Scenarios", 
-                                   paste("with scenario", input$filter_scenario), "")), 
-                      type = "error")
+      showNotification("Enter at least three Year and Count rows before running the model.", type = "error")
       return()
     }
     # Run the surplus production model
@@ -410,8 +368,7 @@ server <- function(input, output, session) {
       )
       
       results <- list(
-        species = input$filter_species,
-        scenario = input$filter_scenario,
+        species = workshop_species,
         n_observations = nrow(species_data),
         data = species_data,
         model_fit = model_fit  
@@ -443,8 +400,7 @@ server <- function(input, output, session) {
       )
     }
 
-    # Create title with scenario if applicable
-    title <- paste("Model Results:", results$species, "-", results$scenario)
+    title <- paste("Model Results:", results$species)
     
     # Display results
     div(
@@ -456,6 +412,10 @@ server <- function(input, output, session) {
         h4("Model Parameters & Stock Status"),
         verbatimTextOutput("model_summary"),
         
+      hr(),
+      h4("CPUE Indices: Observed and Predicted"),
+      plotOutput("cpue_indices_plot", height = "450px"),
+
       hr(),
       fluidRow(
         column(10,
@@ -537,6 +497,14 @@ server <- function(input, output, session) {
     plot_kobe(model_fit)
   })
 
+  output$cpue_indices_plot <- renderPlot({
+    results <- model_results()
+    req(results)
+    req(results$model_fit)
+
+    plot_model_fit(results$model_fit)
+  })
+
   output$biomass_plot <- renderPlot({
     results <- model_results()
     req(results)
@@ -547,141 +515,132 @@ server <- function(input, output, session) {
     plot_biomass_trajectory(model_fit)
   })
 
-  observeEvent(input$add_data, {
-    showModal(modalDialog(
-      title = "Add data",
-      div(class = "modal-section",
-        h4("Species"),
-        selectInput("add_species", NULL, choices = c("Yellowfin_tuna", "Mahi_Mahi", "Opakapaka", "Peacock_grouper", "Yellowfin_goatfish"), selected = "Yellowfin_tuna", width = "100%")
-      ),
-      div(class = "modal-section",
-        h4("Scenario"),
-        selectInput("add_scenario", NULL, choices = c("healthy", "overfished", "recovering", "declining"), selected = "healthy", width = "100%")
-      ),
-      div(class = "modal-section",
-        h4("Date"),
-        numericInput("add_date", NULL, value = 1, width = "100%")
-      ),
-      div(class = "modal-section",
-        h4("Count"),
-        numericInput("add_count", NULL, value = 1, width = "100%")
-      ),
-      div(class = "modal-section",
-        h4("Effort"),
-        numericInput("add_effort", NULL, value = 1, width = "100%")
-      ),
-      footer = tagList(modalButton("Cancel"), actionButton("submit_data", "Add Data", class = "btn-primary")),
-      size = "m",
-      easyClose = TRUE
-    ))
+  observeEvent(input$create_year_rows, {
+    drops <- input$number_of_drops
+    if (is.na(drops) || drops < 1 || drops != floor(drops)) {
+      showNotification("Number of Drops must be a whole number of at least one.", type = "warning")
+      return()
+    }
+
+    start_year <- input$start_year
+    end_year <- input$end_year
+    if (is.na(start_year) || is.na(end_year) || start_year < 1 ||
+        end_year < start_year || start_year != floor(start_year) ||
+        end_year != floor(end_year)) {
+      showNotification("Enter whole-number years with an end year no earlier than the start year.", type = "warning")
+      return()
+    }
+
+    years <- seq(start_year, end_year, by = 1)
+    current_data <- fish_data()
+    new_rows <- empty_workshop_data(length(years))
+    new_rows$Year <- years
+    new_rows[["Number of Drops"]] <- drops
+    matching_rows <- match(years, current_data$Year)
+    new_rows$Count <- current_data$Count[matching_rows]
+    fish_data(new_rows)
+    model_results(NULL)
   })
 
-    observeEvent(input$submit_data, {
+  observeEvent(input$number_of_drops, {
+    drops <- input$number_of_drops
+    if (is.na(drops) || drops < 1 || drops != floor(drops)) return()
+
     current_data <- fish_data()
-    
-    new_row <- data.frame(
-      Species = input$add_species,
-      Scenario = input$add_scenario,
-      Date = input$add_date,
-      Count = input$add_count,
-      Effort = input$add_effort
+    if (nrow(current_data) > 0) {
+      current_data[["Number of Drops"]] <- drops
+      fish_data(current_data)
+    }
+    model_results(NULL)
+  })
+
+  observeEvent(input$upload_data, {
+    uploaded_data <- tryCatch(
+      utils::read.csv(input$upload_data$datapath, check.names = FALSE,
+                      stringsAsFactors = FALSE),
+      error = function(error) error
     )
 
-    updated_data <- rbind(current_data, new_row)
-    fish_data(updated_data)
-    
-    showNotification("Data added successfully!", type = "message")
-    removeModal()
+    if (inherits(uploaded_data, "error")) {
+      showNotification("The selected file could not be read as a CSV.", type = "error")
+      return()
+    }
+
+    required_columns <- c("Species", "Year", "Number of Drops", "Count")
+    if (!all(required_columns %in% names(uploaded_data))) {
+      showNotification(
+        "The CSV must include Species, Year, Number of Drops, and Count columns.",
+        type = "error"
+      )
+      return()
+    }
+
+    uploaded_data <- uploaded_data[, required_columns, drop = FALSE]
+    uploaded_data$Species <- trimws(as.character(uploaded_data$Species))
+    uploaded_data$Year <- suppressWarnings(as.numeric(uploaded_data$Year))
+    uploaded_data[["Number of Drops"]] <- suppressWarnings(
+      as.numeric(uploaded_data[["Number of Drops"]])
+    )
+    uploaded_data$Count <- suppressWarnings(as.numeric(uploaded_data$Count))
+
+    invalid_data <- nrow(uploaded_data) == 0 ||
+      any(uploaded_data$Species != workshop_species) ||
+      any(is.na(uploaded_data$Year) | uploaded_data$Year < 1 |
+            uploaded_data$Year != floor(uploaded_data$Year)) ||
+      any(is.na(uploaded_data[["Number of Drops"]]) |
+            uploaded_data[["Number of Drops"]] < 1 |
+            uploaded_data[["Number of Drops"]] != floor(uploaded_data[["Number of Drops"]])) ||
+      any(is.na(uploaded_data$Count) | uploaded_data$Count < 0)
+
+    if (invalid_data) {
+      showNotification(
+        "Upload a non-empty Opakapaka CSV with whole-number Year and Number of Drops values, and non-negative Count values.",
+        type = "error"
+      )
+      return()
+    }
+
+    uploaded_data <- uploaded_data %>% arrange(Year)
+    fish_data(uploaded_data)
+    model_results(NULL)
+
+    updateNumericInput(session, "start_year", value = min(uploaded_data$Year))
+    updateNumericInput(session, "end_year", value = max(uploaded_data$Year))
+    if (dplyr::n_distinct(uploaded_data[["Number of Drops"]]) == 1) {
+      updateNumericInput(session, "number_of_drops",
+                         value = uploaded_data[["Number of Drops"]][1])
+    }
+
+    showNotification("CSV uploaded. The table has been replaced with the uploaded data.",
+                     type = "message")
   })
 
-  observeEvent(input$edit_row, {
-    selected <- input$data_table_rows_selected
-    
-    if (is.null(selected) || length(selected) == 0) {
-      showNotification("Please select a row to edit", type = "warning")
+  observeEvent(input$data_table_cell_edit, {
+    edit <- input$data_table_cell_edit
+    if (edit$col != 3) return()
+
+    value <- suppressWarnings(as.numeric(edit$value))
+    if (is.na(value) || value < 0) {
+      showNotification("Count must be a non-negative number.", type = "warning")
       return()
     }
-    
+
     current_data <- fish_data()
-    row_data <- current_data[selected, ]
-    
-    showModal(modalDialog(
-      title = "Edit Row",
-      div(class = "modal-section",
-        h4("Species"),
-        selectInput("edit_species", NULL, choices = c("Yellowfin_tuna", "Mahi_Mahi", "Opakapaka", "Peacock_grouper", "Yellowfin_goatfish"), selected = row_data$Species, width = "100%")
-      ),
-      div(class = "modal-section",
-        h4("Scenario"),
-        selectInput("edit_scenario", NULL, c("healthy", "overfished", "recovering", "declining"), selected = row_data$Scenario, width = "100%")
-      ),
-      div(class = "modal-section",
-        h4("Date"),
-        numericInput("edit_date", NULL, value = row_data$Date, width = "100%")
-      ),
-      div(class = "modal-section",
-        h4("Count"),
-        numericInput("edit_count", NULL, value = row_data$Count, min = 0, width = "100%")
-      ),
-      div(class = "modal-section",
-        h4("Effort"),
-        numericInput("edit_effort", NULL, value = row_data$Effort, min = 0, step = 0.5, width = "100%")
-      ),
-      footer = tagList(
-        modalButton("Cancel"),
-        actionButton("save_edit", "Save Changes", class = "btn-primary")
-      ),
-      size = "m",
-      easyClose = TRUE
-    ))
-  })
-  
-  observeEvent(input$save_edit, {
-    selected <- input$data_table_rows_selected
-    current_data <- fish_data()
-    current_data$Date <- as.numeric(current_data$Date)
-    
-    current_data[selected, "Species"] <- input$edit_species
-    current_data[selected, "Scenario"] <- input$edit_scenario
-    current_data[selected, "Date"] <- input$edit_date
-    current_data[selected, "Count"] <- input$edit_count
-    current_data[selected, "Effort"] <- input$edit_effort
-    
+    current_data[edit$row, edit$col + 1] <- value
     fish_data(current_data)
-    
-    showNotification("Row updated successfully!", type = "message")
-    removeModal()
+    model_results(NULL)
   })
-  
-  observeEvent(input$delete_row, {
+
+  observeEvent(input$delete_rows, {
     selected <- input$data_table_rows_selected
-    
     if (is.null(selected) || length(selected) == 0) {
-      showNotification("Please select a row to delete", type = "warning")
+      showNotification("Select one or more rows to delete.", type = "warning")
       return()
     }
-    
-    showModal(modalDialog(
-      title = "Delete Row",
-      "Are you sure you want to delete this row? This action cannot be undone.",
-      footer = tagList(
-        modalButton("Cancel"),
-        actionButton("confirm_delete", "Delete", class = "btn-danger")
-      ),
-      size = "m",
-      easyClose = TRUE
-    ))
-  })
-  
-  observeEvent(input$confirm_delete, {
-    selected <- input$data_table_rows_selected
+
     current_data <- fish_data()
-    
-    current_data <- current_data[-selected, ]
-    fish_data(current_data)
-    
-    showNotification("Row deleted successfully!", type = "message")
-    removeModal()
+    fish_data(current_data[-selected, , drop = FALSE])
+    model_results(NULL)
   })
 
   # Save Kobe plot to summary
@@ -690,18 +649,17 @@ observeEvent(input$save_kobe, {
   req(results)
   
   # Create a unique ID for this result
-  result_id <- paste0(results$species, "_", results$scenario, "_kobe_", 
+  result_id <- paste0(results$species, "_kobe_", 
                       format(Sys.time(), "%Y%m%d_%H%M%S"))
   
   # Store the plot information
   new_result <- list(
     id = result_id,
     species = results$species,
-    scenario = results$scenario,
     plot_type = "kobe",
     model_fit = results$model_fit,
     timestamp = Sys.time(),
-    title = paste("Kobe Plot:", results$species, "-", results$scenario)
+    title = paste("Kobe Plot:", results$species)
   )
   
   # Add to saved results
@@ -719,18 +677,17 @@ observeEvent(input$save_kobe, {
     req(results)
     
     # Create a unique ID for this result
-    result_id <- paste0(results$species, "_", results$scenario, "_biomass_", 
+    result_id <- paste0(results$species, "_biomass_", 
                         format(Sys.time(), "%Y%m%d_%H%M%S"))
     
     # Store the plot information
     new_result <- list(
       id = result_id,
       species = results$species,
-      scenario = results$scenario,
       plot_type = "biomass",
       model_fit = results$model_fit,
       timestamp = Sys.time(),
-      title = paste("Biomass Trajectory:", results$species, "-", results$scenario)
+      title = paste("Biomass Trajectory:", results$species)
     )
     
     # Add to saved results

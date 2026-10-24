@@ -1,6 +1,5 @@
-# Code to simulate catch and CPUE data using a surplus production model. Four terminal stock status scenarios are
-# available: healthy, "overfished", "recovering", or "declining". 
-# Simulated data can then be combined with data collected during the workshop by participants. 
+# Code to simulate catch and CPUE data for an Opakapaka fishery that starts pristine.
+# Simulated data can then be combined with data collected during the workshop by participants.
 # Workshop data is rescaled, before combining with the historical data to get CPUE on same scale. 
 # Combined data is then fit with a surplus production model and biomass, F, and reference points are estimated. 
 # Terminal stock status is evaluated and the particpants can discuss how fishing activities affected the population.  
@@ -14,13 +13,14 @@ library(tidyr)
 
 source("./R/sim_data_funs.R") 
 source("./R/fit_spm_funs.R")
-sps_lh <- read.csv("./R/species_LH_params.csv")
+sps_lh <- read.csv("./R/species_LH_params.csv") %>%
+  filter(Species == "Opakapaka")
 
 ##-------------------- Generate historical + workshop data ---------------------#
 ## using opaka LH parameters
 historical <- generate_historical_data(
   n_years = 12, 
-  scenario = "overfished",  # stock will end in overfished status
+  scenario = "pristine",
   K = 300000,
   r = 0.18,
   q = 2.5e-05,
@@ -28,7 +28,7 @@ historical <- generate_historical_data(
   seed = 42
 )
 
-scenarios_vec <- c("healthy", "overfished", "recovering", "declining")
+scenarios_vec <- "pristine"
 species_vec <- sps_lh$Species
 
 run_grid <- expand_grid(
@@ -37,8 +37,8 @@ run_grid <- expand_grid(
 ) %>%
   left_join(sps_lh, by = "Species") %>%
   mutate(
-    catch_cv = ifelse(scenario == "recovering", 0.05, 0.15),
-    effort_cv = ifelse(scenario == "recovering", 0.10, 0.20)
+    catch_cv = 0.15,
+    effort_cv = 0.20
   )
 
 results <- run_grid %>%
@@ -55,10 +55,6 @@ results <- run_grid %>%
       seed = 42
     )
   }))
-
-tuna_healthy <- results %>% 
-  filter(Species == "Yellowfin_tuna" & scenario == "healthy") %>%
-  pull(historical_data)
 
 final_flat_data <- results %>% unnest(historical_data) %>% rename("Scenario" = scenario)
 write.csv(final_flat_data, "./R/historical_data.csv", row.names = FALSE)
@@ -101,9 +97,9 @@ guidance_all <- final_flat_data %>%
     })
   )
 
-# View guidance for a specific case
+# View guidance for the workshop fishery
 guidance_all %>%
-  filter(Species == "Yellowfin_tuna", Scenario == "healthy") %>%
+  filter(Species == "Opakapaka", Scenario == "pristine") %>%
   pull(guidance) %>%
   .[[1]] %>%
   print()
@@ -177,21 +173,21 @@ scaling_by_species <- hist_catch_shiny %>%
   mutate(Count = round(Count))
 
 # 1. Create the bidirectional scaling object
-hist_catch_shiny_yt <- hist_catch_shiny %>% filter(Species == "Yellowfin_tuna")
+hist_catch_shiny_opakapaka <- hist_catch_shiny %>% filter(Species == "Opakapaka")
 
 scaling <- create_bidirectional_scaling(
-  historical_data = hist_catch_shiny_yt,
+  historical_data = hist_catch_shiny_opakapaka,
   reference_marbles = 20,    # 20 marbles = mean historical catch
   reference_time_sec = 30     # 30 seconds = mean historical effort
 )
-workshop_display <- display_for_workshop(hist_catch_shiny_yt, scaling, columns_to_show = c("Species", "Date", "Count", "Effort"))
+workshop_display <- display_for_workshop(hist_catch_shiny_opakapaka, scaling, columns_to_show = c("Species", "Date", "Count", "Effort"))
 print(workshop_display)
 
 combined_data <- workshop_display %>% select(-CPUE_marbles) %>% rename("Year" = Date, "Catch" = Marbles, "Effort" = Seconds)
-scaling_by_species_yt <- scaling_by_species %>% filter(Species == "Yellowfin_tuna" & Scenario == "recovering")
+scaling_by_species_opakapaka <- scaling_by_species %>% filter(Species == "Opakapaka" & Scenario == "pristine")
 ##-------------------- Fit model ---------------------#
 model_fit <- fit_schaefer_model(
-  data = scaling_by_species_yt,
+  data = scaling_by_species_opakapaka,
   use_cpue = TRUE
 )
 
@@ -205,6 +201,6 @@ plot_biomass_trajectory(model_fit)
 
 plot_kobe(model_fit) 
 
-plot_catch_data(scaling_by_species_yt)
+plot_catch_data(scaling_by_species_opakapaka)
 
-plot_cpue(scaling_by_species_yt)
+plot_cpue(scaling_by_species_opakapaka)

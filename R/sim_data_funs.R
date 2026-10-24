@@ -7,11 +7,10 @@ library(ggplot2)
 #' Generate Historical Fisheries Data
 #' 
 #' Creates synthetic catch and effort data following Schaefer surplus production model
-#' with realistic variability and different stock status scenarios. This version ensures
-#' the FINAL biomass matches the scenario (e.g., healthy stocks end healthy).
+#' with realistic variability from a pristine starting condition.
 #'
 #' @param n_years Number of historical years to generate (default: 12)
-#' @param scenario Stock status scenario: "healthy", "overfished", "recovering", or "declining"
+#' @param scenario Stock condition label
 #' @param K Carrying capacity (unfished biomass)
 #' @param r Intrinsic growth rate
 #' @param q Catchability coefficient
@@ -157,14 +156,10 @@ generate_biomass_trajectory <- function(n_years, B_initial, B_final, K, r,
     B <- seq(B_initial, B_final, length.out = n_years)
     
   } else if (trajectory_type == "smooth") {
-    # Trajectory shape depends on r
-    # High r species (like Mahi) change faster (steeper curve)
-    # Low r species (like Opakapaka) change slower (gentler curve)
+    # Trajectory shape depends on intrinsic growth rate
     
     # Scale curve steepness by r
-    # r = 0.18 (Opaka): gentle curve (steepness ~ 2)
-    # r = 0.35 (Tuna): moderate curve (steepness ~ 3)
-    # r = 1.20 (Mahi): steep curve (steepness ~ 5)
+    # Opakapaka's low intrinsic growth rate produces a gentle curve.
     steepness <- 1 + (r / 0.3) * 2
     steepness <- max(1.5, min(steepness, 6))  # Bound between 1.5 and 6
     
@@ -225,81 +220,40 @@ generate_biomass_trajectory <- function(n_years, B_initial, B_final, K, r,
   
   # Ensure biomass stays within reasonable bounds
   B <- pmax(B, K * 0.05)  # At least 5% of K
-  B <- pmin(B, K * 0.95)  # At most 95% of K
+  B <- pmin(B, K)         # At most the unfished biomass
   
   return(B)
 }
 
 
-#' Get Scenario-Specific Parameters
+#' Get Pristine Stock Parameters
 #'
-#' @param scenario Stock status scenario
+#' @param scenario Stock condition label
 #' @param K Carrying capacity
 #' @param Bmsy Biomass at MSY
 #'
 #' @return List with scenario parameters
 get_scenario_params <- function(scenario, K, Bmsy) {
-  
-  params <- switch(scenario,
-    "healthy" = list(
-      B_initial = Bmsy * 1.3,      # Start above Bmsy (healthy)
-      B_final = Bmsy * 1.1,        # End slightly above Bmsy (slight decline from fishing)
-      trajectory_type = "smooth",
-      base_effort = 3000,
-      description = "Stock declining slightly from fishing but remaining healthy"
-    ),
-    "overfished" = list(
-      B_initial = Bmsy * 0.8,      # Start below Bmsy
-      B_final = Bmsy * 0.35,       # End well below Bmsy (overfished!)
-      trajectory_type = "smooth",
-      base_effort = 6000,
-      description = "Stock declining due to overfishing"
-    ),
-    "recovering" = list(
-      B_initial = Bmsy * 0.60,     # Start partially overfished
-      B_final = Bmsy * 1.2,        # End fully recovered
-      trajectory_type = "recovery_contrast",
-      base_effort = 2000,
-      description = "Stock recovering from overfished state"
-    ),
-    "declining" = list(
-      B_initial = Bmsy * 1.3,      # Start healthy
-      B_final = Bmsy * 0.60,       # End below Bmsy (declining!)
-      trajectory_type = "smooth",
-      base_effort = 5000,
-      description = "Stock declining from healthy to overfished"
-    ),
-    "stable" = list(
-      B_initial = Bmsy * 1.0,      # Start at Bmsy
-      B_final = Bmsy * 1.05,       # End at Bmsy (stable!)
-      trajectory_type = "fluctuating",
-      base_effort = 4000,
-      description = "Stock fluctuating around Bmsy"
-    ),
-    # Default to healthy
-    list(
-      B_initial = Bmsy * 0.8,
-      B_final = Bmsy * 1.2,
-      trajectory_type = "smooth",
-      base_effort = 3000,
-      description = "Stock at healthy levels"
-    )
+  list(
+    B_initial = K,
+    B_final = K * 0.8,
+    trajectory_type = "linear",
+    base_effort = 3000,
+    description = "Stock starts at unfished biomass and declines as fishing begins"
   )
-  
-  return(params)
 }
 
 #' Generate Data for Multiple Groups
 #'
-#' Creates historical data for multiple fishing groups with different scenarios
+#' Creates historical data for multiple fishing groups from pristine conditions
 #'
 #' @param n_groups Number of groups
-#' @param scenarios Vector of scenarios (recycled if needed)
+#' @param scenarios Vector of stock-condition labels (recycled if needed)
 #' @param ... Additional arguments passed to generate_historical_data
 #'
 #' @return List of data frames, one per group
 generate_multi_group_data <- function(n_groups = 4,
-                                       scenarios = c("healthy", "overfished", "recovering", "declining"),
+                                       scenarios = "pristine",
                                        ...) {
   
   # Recycle scenarios if needed
@@ -323,9 +277,11 @@ generate_multi_group_data <- function(n_groups = 4,
 #'
 #' @return ggplot object
 plot_catch_data <- function(data) {
+  year_breaks <- sort(unique(as.numeric(data$Date)))
   
-  ggplot(data, aes(x = Date, y = Count)) +
+  ggplot(data, aes(x = as.numeric(Date), y = Count)) +
     geom_col(fill = "#2E86AB") +
+    scale_x_continuous(breaks = year_breaks, labels = year_breaks) +
     labs(
       title = paste0("Historical Catch Data (", n_distinct(data$Date), " years)"),
       x = "Date",
@@ -343,6 +299,7 @@ plot_catch_data <- function(data) {
 #'
 #' @return ggplot object
 plot_cpue <- function(data) {
+  year_breaks <- sort(unique(as.numeric(data$Date)))
   
   scenario <- attr(data, "scenario")
   final_status <- attr(data, "final_B_Bmsy")
@@ -354,6 +311,7 @@ plot_cpue <- function(data) {
   ggplot(data, aes(x = as.numeric(Date), y = CPUE)) +
     geom_line(color = "#457B9D", linewidth = 1) +
     geom_point(fill = "#A8DADC", color = "#457B9D", shape = 21, size = 3) +
+    scale_x_continuous(breaks = year_breaks, labels = year_breaks) +
     #geom_smooth(method = "loess", se = TRUE, color = "#457B9D", fill = "#A8DADC") +
     labs(
       title = "Catch Per Unit Effort (CPUE) Over Time",
@@ -486,16 +444,16 @@ check_data_quality <- function(data) {
   
   if (length(warnings) > 0) {
     cat("\nWARNINGS:\n")
-    for (w in warnings) cat("  ", clisymbols::symbol$warning, w, "\n")
+    for (w in warnings) cat("  WARNING:", w, "\n")
   }
   
   if (length(issues) > 0) {
     cat("\nISSUES (may prevent fitting):\n")
-    for (i in issues) cat("  ", clisymbols::symbol$cross, i, "\n")
+    for (i in issues) cat("  ERROR:", i, "\n")
   }
   
   if (length(issues) == 0 && length(warnings) == 0) {
-    cat("\n", clisymbols::symbol$tick, " Data quality looks good!\n")
+    cat("\nData quality looks good!\n")
   }
   
   cat("\n")

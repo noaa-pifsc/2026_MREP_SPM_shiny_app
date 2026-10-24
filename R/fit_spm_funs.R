@@ -16,6 +16,13 @@ fit_schaefer_model <- function(data,
                                initial_params = NULL,
                                method = "L-BFGS-B",
                                use_cpue = TRUE) {
+
+  if (!"Date" %in% names(data) && "Year" %in% names(data)) {
+    data$Date <- data$Year
+  }
+  if (!"Date" %in% names(data)) {
+    stop("Data must include a Year or Date column.")
+  }
   
   # Check data quality first
   data_check <- check_data_quality(data)
@@ -56,7 +63,7 @@ fit_schaefer_model <- function(data,
     # Rough rule: MSY ≈ 0.4 * mean catch for developing fishery
     # MSY = rK/4, so K = 4*MSY/r
     # Initial guess: r ≈ 0.2-0.3 for most stocks
-    K_guess <- (mean_catch * 2) / 0.15  # Conservative estimate
+    K_guess <- (mean_catch * 2) / 0.15
     
     # Estimate q from CPUE
     # CPUE = q*B, and if stock near K/2, then q ≈ CPUE/(K/2)
@@ -88,8 +95,8 @@ fit_schaefer_model <- function(data,
   
   upper_bounds <- c(
     r = 2.0,
-    K = max(catch) * 50,
-    q = 0.1
+    K = max(K_guess * 20, max(catch) * 50),
+    q = max(0.1, q_guess * 10)
   )
   
   # Define objective function (negative log-likelihood)
@@ -101,7 +108,7 @@ fit_schaefer_model <- function(data,
     
     # Initialize biomass vector
     B <- numeric(n_years)
-    B[1] <- K * 0.8  # Start at 80% of K
+    B[1] <- K  # Start at unfished biomass
     
     # Predicted values
     cpue_pred <- numeric(n_years)
@@ -113,12 +120,11 @@ fit_schaefer_model <- function(data,
       # Predicted CPUE
       cpue_pred[t] <- q * B[t]
       
-      # Predicted catch
-      F_rate <- q * effort[t]
-      if (F_rate > 0 && B[t] > 0) {
-        catch_pred[t] <- (F_rate / (F_rate + 0.01)) * B[t] * (1 - exp(-(F_rate + 0.01)))
-      } else {
-        catch_pred[t] <- 0
+      if (!use_cpue) {
+        F_rate <- q * effort[t]
+        if (F_rate > 0 && B[t] > 0) {
+          catch_pred[t] <- (F_rate / (F_rate + 0.01)) * B[t] * (1 - exp(-(F_rate + 0.01)))
+        }
       }
       
       # Update biomass for next year
@@ -243,10 +249,10 @@ fit_schaefer_model <- function(data,
   
   # Report convergence status
   if (fit$convergence == 0) {
-    cat("\n", clisymbols::symbol$tick, " Model converged successfully!\n")
+    cat("\nModel converged successfully!\n")
     cat("  Final objective value:", fit$value, "\n\n")
   } else {
-    cat("\n", clisymbols::symbol$warning, " Model convergence uncertain (code:", fit$convergence, ")\n")
+    cat("\nModel convergence uncertain (code:", fit$convergence, ")\n")
     cat("  Final objective value:", fit$value, "\n")
     cat("  Parameter estimates may be approximate\n\n")
   }
@@ -265,7 +271,7 @@ fit_schaefer_model <- function(data,
     
     # Run forward simulation with estimated parameters to get biomass trajectory
     B_est <- numeric(n_years)
-    B_est[1] <- K_est * 0.8
+    B_est[1] <- K_est
     cpue_pred <- numeric(n_years)
     catch_pred <- numeric(n_years)
     F_est <- numeric(n_years)
@@ -273,11 +279,9 @@ fit_schaefer_model <- function(data,
     for (t in 1:n_years) {
       cpue_pred[t] <- q_est * B_est[t]
       F_est[t] <- q_est * effort[t]
-      
+
       if (F_est[t] > 0 && B_est[t] > 0) {
         catch_pred[t] <- (F_est[t] / (F_est[t] + 0.01)) * B_est[t] * (1 - exp(-(F_est[t] + 0.01)))
-      } else {
-        catch_pred[t] <- 0
       }
       
       if (t < n_years) {
@@ -383,6 +387,13 @@ fit_schaefer_model <- function(data,
 #' @return Schaefer fit object
 fit_simple_schaefer <- function(data) {
   
+  if (!"Date" %in% names(data) && "Year" %in% names(data)) {
+    data$Date <- data$Year
+  }
+  if (!"Date" %in% names(data)) {
+    stop("Data must include a Year or Date column.")
+  }
+
   years <- data$Date
   catch <- data$Count
   effort <- data$Effort
@@ -402,7 +413,7 @@ fit_simple_schaefer <- function(data) {
     K <- params[2]
     
     B <- numeric(n_years)
-    B[1] <- K * 0.8
+    B[1] <- K
     cpue_pred <- numeric(n_years)
     
     for (t in 1:n_years) {
@@ -442,7 +453,7 @@ fit_simple_schaefer <- function(data) {
   
   # Forward simulation for results
   B_est <- numeric(n_years)
-  B_est[1] <- K_est * 0.8
+  B_est[1] <- K_est
   cpue_pred <- numeric(n_years)
   F_est <- numeric(n_years)
   catch_pred <- numeric(n_years)
@@ -450,11 +461,9 @@ fit_simple_schaefer <- function(data) {
   for (t in 1:n_years) {
     cpue_pred[t] <- q_est * B_est[t]
     F_est[t] <- q_est * effort[t]
-    
+
     if (F_est[t] > 0 && B_est[t] > 0) {
       catch_pred[t] <- (F_est[t] / (F_est[t] + 0.01)) * B_est[t] * (1 - exp(-(F_est[t] + 0.01)))
-    } else {
-      catch_pred[t] <- 0
     }
     
     if (t < n_years) {
@@ -573,25 +582,25 @@ print.schaefer_fit <- function(fit) {
   cat(sprintf("  Current Biomass: %.0f\n", fit$current_status$B_current))
   cat(sprintf("  Current Fishing Mortality: %.4f\n", fit$current_status$F_current))
   cat(sprintf("  Biomass/Bmsy: %.2f %s\n", fit$current_status$B_Bmsy,
-              ifelse(fit$current_status$B_Bmsy > 1, clisymbols::symbol$tick, clisymbols::symbol$cross)))
+              ifelse(fit$current_status$B_Bmsy > 1, "[OK]", "[LOW]")))
   cat(sprintf("  Fishing mortality/Fmsy: %.2f %s\n", fit$current_status$F_Fmsy,
-              ifelse(fit$current_status$F_Fmsy < 1, clisymbols::symbol$tick, clisymbols::symbol$cross)))
+              ifelse(fit$current_status$F_Fmsy < 1, "[OK]", "[HIGH]")))
   cat(sprintf("  Status: %s\n\n", fit$current_status$status))
   
   cat("MANAGEMENT ADVICE:\n")
   if (fit$current_status$B_Bmsy < 0.5) {
-    cat("  ", clisymbols::symbol$warning, "CRITICAL: Stock severely depleted. Immediate reduction in fishing needed.\n")
+    cat("  CRITICAL: Stock severely depleted. Immediate reduction in fishing needed.\n")
     cat(sprintf("  Recommended catch: %.0f (50%% of recent average)\n", 
                 mean(tail(fit$time_series$Catch_obs, 3)) * 0.5))
   } else if (fit$current_status$B_Bmsy < 1.0) {
-    cat("  ", clisymbols::symbol$warning, "WARNING: Stock below target level. Reduce fishing pressure.\n")
+    cat("  WARNING: Stock below target level. Reduce fishing pressure.\n")
     cat(sprintf("  Recommended catch: %.0f (70%% of MSY)\n", 
                 fit$reference_points$MSY * 0.7))
   } else if (fit$current_status$F_Fmsy > 1.2) {
-    cat("  ", clisymbols::symbol$warning, "CAUTION: Fishing pressure too high. Reduce effort.\n")
+    cat("  CAUTION: Fishing pressure too high. Reduce effort.\n")
     cat(sprintf("  Recommended catch: %.0f (MSY)\n", fit$reference_points$MSY))
   } else {
-    cat("  ", clisymbols::symbol$tick, "Stock in good condition. Maintain current fishing levels.\n")
+    cat("  Stock in good condition. Maintain current fishing levels.\n")
     cat(sprintf("  Recommended catch: %.0f (MSY)\n", fit$reference_points$MSY))
   }
   
