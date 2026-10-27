@@ -363,8 +363,7 @@ server <- function(input, output, session) {
     # Run the surplus production model
     tryCatch({
       model_fit <- fit_schaefer_model(
-        data = species_data,
-        use_cpue = TRUE
+        data = species_data
       )
       
       results <- list(

@@ -8,14 +8,10 @@
 #'
 #' @param data Data frame with columns: Year, Count, Effort (and optionally CPUE)
 #' @param initial_params Named vector of starting values for optimization
-#' @param method Optimization method (default: "L-BFGS-B")
-#' @param use_cpue If TRUE, fit to CPUE data; if FALSE, fit to catch (default: TRUE)
 #'
 #' @return List containing model fit results, parameters, and reference points
 fit_schaefer_model <- function(data,
-                               initial_params = NULL,
-                               method = "L-BFGS-B",
-                               use_cpue = TRUE) {
+                               initial_params = NULL) {
 
   if (!"Date" %in% names(data) && "Year" %in% names(data)) {
     data$Date <- data$Year
@@ -32,21 +28,21 @@ fit_schaefer_model <- function(data,
   
   # Extract data vectors
   years <- data$Date
-  catch <- data$Count
+  catch_obs <- data$Count #observed in data table
+  catch_biomass <- catch_obs * 1000 # scaled appropriately for biomass dynamics
   effort <- data$Effort
   n_years <- length(years)
   
   # Calculate CPUE if not provided
   if (!"CPUE" %in% names(data)) {
-    data$CPUE <- catch / effort
+    data$CPUE <- catch_obs / effort
   }
   cpue_obs <- data$CPUE
   
   # Set initial parameter values if not provided
   if (is.null(initial_params)) {
     # Intelligent starting values based on data
-    max_catch <- max(catch, na.rm = TRUE)
-    mean_catch <- mean(catch, na.rm = TRUE)
+    max_catch <- max(catch_biomass, na.rm = TRUE)
     mean_cpue <- mean(cpue_obs, na.rm = TRUE)
     
     # Safely estimate CPUE trend
@@ -63,12 +59,13 @@ fit_schaefer_model <- function(data,
     # Rough rule: MSY ≈ 0.4 * mean catch for developing fishery
     # MSY = rK/4, so K = 4*MSY/r
     # Initial guess: r ≈ 0.2-0.3 for most stocks
-    K_guess <- (mean_catch * 2) / 0.15
+    K_guess <- (mean(catch_biomass) * 2) / 0.15
     
     # Estimate q from CPUE
     # CPUE = q*B, and if stock near K/2, then q ≈ CPUE/(K/2)
-    q_guess <- mean_cpue / (K_guess * 0.5)
-    q_guess <- max(q_guess, 0.00001)  # Ensure positive
+    # q_guess <- mean_cpue / (K_guess * 0.5)
+    # q_guess <- max(q_guess, 0.00001)  # Ensure positive
+    q_guess <- 0.000025  # Default small positive value for q
     
     # Estimate r from CPUE trend
     # Declining CPUE suggests higher r needed to compensate
@@ -89,13 +86,13 @@ fit_schaefer_model <- function(data,
   # Set parameter bounds
   lower_bounds <- c(
     r = 0.01,
-    K = max(catch) * 2,
+    K = max(catch_biomass) * 2,
     q = 0.000001
   )
   
   upper_bounds <- c(
     r = 2.0,
-    K = max(K_guess * 20, max(catch) * 50),
+    K = max(K_guess * 20, max(catch_biomass) * 50),
     q = max(0.1, q_guess * 10)
   )
   
@@ -105,6 +102,10 @@ fit_schaefer_model <- function(data,
     r <- params[1]
     K <- params[2]
     q <- params[3]
+
+    if (any(!is.finite(params)) || any(params < lower_bounds) || any(params > upper_bounds)) {
+      return(Inf)
+    }
     
     # Initialize biomass vector
     B <- numeric(n_years)
@@ -112,25 +113,16 @@ fit_schaefer_model <- function(data,
     
     # Predicted values
     cpue_pred <- numeric(n_years)
-    catch_pred <- numeric(n_years)
-    
     # Forward simulation
     for (t in 1:n_years) {
       
       # Predicted CPUE
       cpue_pred[t] <- q * B[t]
       
-      if (!use_cpue) {
-        F_rate <- q * effort[t]
-        if (F_rate > 0 && B[t] > 0) {
-          catch_pred[t] <- (F_rate / (F_rate + 0.01)) * B[t] * (1 - exp(-(F_rate + 0.01)))
-        }
-      }
-      
       # Update biomass for next year
       if (t < n_years) {
         surplus <- r * B[t] * (1 - B[t] / K)
-        B[t + 1] <- B[t] + surplus - catch[t]
+        B[t + 1] <- B[t] + surplus - catch_biomass[t]
         
         # Prevent negative or extreme biomass
         B[t + 1] <- max(B[t + 1], K * 0.01)
@@ -138,19 +130,12 @@ fit_schaefer_model <- function(data,
       }
     }
     
-    # Calculate negative log-likelihood
-    if (use_cpue) {
-      # Fit to CPUE (more stable for workshop data)
-      residuals <- log(cpue_obs + 0.0001) - log(cpue_pred + 0.0001)
-      nll <- sum(residuals^2, na.rm = TRUE)
-    } else {
-      # Fit to catch
-      residuals <- log(catch + 1) - log(catch_pred + 1)
-      nll <- sum(residuals^2, na.rm = TRUE)
-    }
+    # Fit the CPUE index on the log scale.
+    residuals <- log(cpue_obs + 0.0001) - log(cpue_pred + 0.0001)
+    nll <- sum(residuals^2, na.rm = TRUE)
     
     # Add penalty for unrealistic parameters
-    if (r < 0.01 || r > 2 || K < max(catch) || q < 0 || q > 1) {
+    if (r < 0.01 || r > 2 || K < max(catch_biomass) || q < 0 || q > 1) {
       nll <- nll + 1000
     }
     
@@ -171,7 +156,8 @@ fit_schaefer_model <- function(data,
     method = "L-BFGS-B",
     lower = lower_bounds,
     upper = upper_bounds,
-    control = list(maxit = 3000, factr = 1e10, pgtol = 1e-8)
+    control = list(maxit = 3000, factr = 1e10, pgtol = 1e-8,
+     parscale = c(r = 0.2, K = 300000, q = 0.000025))
   ), silent = TRUE)
   
   if (!inherits(fit1, "try-error") && fit1$value < best_value) {
@@ -190,53 +176,15 @@ fit_schaefer_model <- function(data,
       method = "L-BFGS-B",
       lower = lower_bounds,
       upper = upper_bounds,
-      control = list(maxit = 3000, factr = 1e10)
-    ), silent = TRUE)
+      control = list(maxit = 3000, factr = 1e10, 
+       parscale = c(r = 0.2, K = 300000, q = 0.000025))
+    ),silent = TRUE)
+    
     
     if (!inherits(fit2, "try-error") && fit2$value < best_value) {
       best_fit <- fit2
       best_value <- fit2$value
       cat("    Objective value:", fit2$value, "Convergence:", fit2$convergence, "\n")
-    }
-  }
-  
-  # Strategy 3: Nelder-Mead (no gradients, more robust)
-  if (is.null(best_fit) || best_fit$convergence != 0) {
-    cat("  Method 3: Nelder-Mead...\n")
-    start_params <- if (!is.null(best_fit)) best_fit$par else initial_params
-    fit3 <- try(optim(
-      par = start_params,
-      fn = objective_function,
-      method = "Nelder-Mead",
-      control = list(maxit = 5000, reltol = 1e-10)
-    ), silent = TRUE)
-    
-    if (!inherits(fit3, "try-error") && fit3$value < best_value) {
-      best_fit <- fit3
-      best_value <- fit3$value
-      cat("    Objective value:", fit3$value, "Convergence:", fit3$convergence, "\n")
-    }
-  }
-  
-  # Strategy 4: BFGS (unconstrained, then check bounds)
-  if (is.null(best_fit) || best_fit$convergence != 0) {
-    cat("  Method 4: BFGS...\n")
-    start_params <- if (!is.null(best_fit)) best_fit$par else initial_params
-    fit4 <- try(optim(
-      par = start_params,
-      fn = objective_function,
-      method = "BFGS",
-      control = list(maxit = 2000)
-    ), silent = TRUE)
-    
-    if (!inherits(fit4, "try-error") && fit4$value < best_value) {
-      # Check if parameters are within bounds
-      in_bounds <- all(fit4$par >= lower_bounds & fit4$par <= upper_bounds)
-      if (in_bounds) {
-        best_fit <- fit4
-        best_value <- fit4$value
-        cat("    Objective value:", fit4$value, "Convergence:", fit4$convergence, "\n")
-      }
     }
   }
   
@@ -286,7 +234,7 @@ fit_schaefer_model <- function(data,
       
       if (t < n_years) {
         surplus <- r_est * B_est[t] * (1 - B_est[t] / K_est)
-        B_est[t + 1] <- B_est[t] + surplus - catch[t]
+        B_est[t + 1] <- B_est[t] + surplus - catch_biomass[t]
         B_est[t + 1] <- max(B_est[t + 1], K_est * 0.01)
         B_est[t + 1] <- min(B_est[t + 1], K_est * 1.5)
       }
@@ -303,10 +251,10 @@ fit_schaefer_model <- function(data,
     stock_status <- get_stock_status(B_Bmsy, F_Fmsy)
     
     # Calculate residuals and fit statistics
-    residuals <- cpue_obs - cpue_pred
+    residuals <- log(cpue_obs + 0.0001) - log(cpue_pred + 0.0001)
     rmse <- sqrt(mean(residuals^2, na.rm = TRUE))
     r_squared <- 1 - (sum(residuals^2, na.rm = TRUE) / 
-                      sum((cpue_obs - mean(cpue_obs, na.rm = TRUE))^2, na.rm = TRUE))
+                      sum((log(cpue_obs + 0.0001) - mean(log(cpue_obs + 0.0001), na.rm = TRUE))^2, na.rm = TRUE))
     
     # Create results object
     results <- list(
@@ -341,7 +289,7 @@ fit_schaefer_model <- function(data,
       # Time series
       time_series = data.frame(
         Year = as.numeric(years),
-        Catch_obs = catch,
+        Catch_obs = catch_obs,
         Catch_pred = catch_pred,
         Effort = effort,
         CPUE_obs = cpue_obs,
@@ -363,17 +311,7 @@ fit_schaefer_model <- function(data,
     return(results)
     
   }, error = function(e) {
-    warning("Model fitting failed: ", e$message)
-    cat("\nTrying simplified fitting approach...\n")
-    
-    # Simplified approach: Fix q and estimate r and K only
-    tryCatch({
-      simple_fit <- fit_simple_schaefer(data)
-      return(simple_fit)
-    }, error = function(e2) {
-      warning("Simplified fitting also failed: ", e2$message)
-      return(NULL)
-    })
+    stop("Failed to build Schaefer model results: ", e$message)
   })
 }
 
@@ -395,15 +333,16 @@ fit_simple_schaefer <- function(data) {
   }
 
   years <- data$Date
-  catch <- data$Count
+  catch_obs <- data$Count
+  catch_biomass <- catch_obs * 1000
   effort <- data$Effort
   n_years <- length(years)
   
-  cpue_obs <- catch / effort
+  cpue_obs <- catch_obs / effort
   mean_cpue <- mean(cpue_obs)
   
   # Fix q at a reasonable value
-  q_fixed <- mean_cpue / (mean(catch) * 2)
+  q_fixed <- 0.000025
   
   cat(sprintf("Using simplified 2-parameter model with q fixed at %.6f\n", q_fixed))
   
@@ -421,7 +360,7 @@ fit_simple_schaefer <- function(data) {
       
       if (t < n_years) {
         surplus <- r * B[t] * (1 - B[t] / K)
-        B[t + 1] <- B[t] + surplus - catch[t]
+        B[t + 1] <- B[t] + surplus - catch_biomass[t]
         B[t + 1] <- max(B[t + 1], K * 0.01)
         B[t + 1] <- min(B[t + 1], K * 1.5)
       }
@@ -433,11 +372,11 @@ fit_simple_schaefer <- function(data) {
   
   # Optimize
   fit <- optim(
-    par = c(r = 0.3, K = mean(catch) * 10),
+    par = c(r = 0.3, K = mean(catch_biomass) * 10),
     fn = obj_simple,
     method = "L-BFGS-B",
-    lower = c(0.01, max(catch) * 2),
-    upper = c(2.0, max(catch) * 50),
+    lower = c(0.01, max(catch_biomass) * 2),
+    upper = c(2.0, max(catch_biomass) * 50),
     control = list(maxit = 2000)
   )
   
@@ -468,7 +407,7 @@ fit_simple_schaefer <- function(data) {
     
     if (t < n_years) {
       surplus <- r_est * B_est[t] * (1 - B_est[t] / K_est)
-      B_est[t + 1] <- B_est[t] + surplus - catch[t]
+      B_est[t + 1] <- B_est[t] + surplus - catch_biomass[t]
       B_est[t + 1] <- max(B_est[t + 1], K_est * 0.01)
       B_est[t + 1] <- min(B_est[t + 1], K_est * 1.5)
     }
@@ -480,10 +419,10 @@ fit_simple_schaefer <- function(data) {
   F_Fmsy <- F_current / Fmsy
   stock_status <- get_stock_status(B_Bmsy, F_Fmsy)
   
-  residuals <- cpue_obs - cpue_pred
+  residuals <- log(cpue_obs + 0.0001) - log(cpue_pred + 0.0001)
   rmse <- sqrt(mean(residuals^2, na.rm = TRUE))
   r_squared <- 1 - (sum(residuals^2, na.rm = TRUE) / 
-                    sum((cpue_obs - mean(cpue_obs, na.rm = TRUE))^2, na.rm = TRUE))
+                    sum((log(cpue_obs + 0.0001) - mean(log(cpue_obs + 0.0001), na.rm = TRUE))^2, na.rm = TRUE))
   
   results <- list(
     convergence = fit$convergence,
@@ -513,7 +452,7 @@ fit_simple_schaefer <- function(data) {
     
     time_series = data.frame(
       Year = years,
-      Catch_obs = catch,
+      Catch_obs = catch_obs,
       Catch_pred = catch_pred,
       Effort = effort,
       CPUE_obs = cpue_obs,
@@ -781,8 +720,7 @@ plot_kobe <- function(fit) {
 # cat("Fitting Schaefer surplus production model...\n\n")
 
 # model_fit <- fit_schaefer_model(
-#   data = historical,
-#   use_cpue = TRUE
+#   data = historical
 # )
 
 # # Display results

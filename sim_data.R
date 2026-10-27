@@ -188,7 +188,6 @@ scaling_by_species_opakapaka <- scaling_by_species %>% filter(Species == "Opakap
 ##-------------------- Fit model ---------------------#
 model_fit <- fit_schaefer_model(
   data = scaling_by_species_opakapaka,
-  use_cpue = TRUE
 )
 
 ##-------------------- Plot results ---------------------#
